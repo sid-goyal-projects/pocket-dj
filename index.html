@@ -275,8 +275,9 @@ const VIBES={
 };
 const CAM={'C major':'8B','G major':'9B','D major':'10B','A major':'11B','E major':'12B','B major':'1B','F# major':'2B','Gb major':'2B','Db major':'3B','C# major':'3B','Ab major':'4B','G# major':'4B','Eb major':'5B','D# major':'5B','Bb major':'6B','A# major':'6B','F major':'7B',
   'A minor':'8A','E minor':'9A','B minor':'10A','F# minor':'11A','Gb minor':'11A','C# minor':'12A','Db minor':'12A','G# minor':'1A','Ab minor':'1A','D# minor':'2A','Eb minor':'2A','A# minor':'3A','Bb minor':'3A','F minor':'4A','C minor':'5A','G minor':'6A','D minor':'7A'};
+const normKey=k=>k?String(k).replace(/\s+flat\b/i,'b').replace(/\s+sharp\b/i,'#').replace(/\s+/g,' ').trim():k;
 function keyDist(a,b){
-  const x=CAM[a], y=CAM[b]; if(!x||!y) return 0.5;
+  const x=CAM[normKey(a)], y=CAM[normKey(b)]; if(!x||!y) return 0.5;
   const nx=parseInt(x), ny=parseInt(y), d=Math.min((nx-ny+12)%12,(ny-nx+12)%12);
   if(x===y) return 0; if(d===0) return 0.15; if(d===1&&x.slice(-1)===y.slice(-1)) return 0.1; return Math.min(1,0.4+d*0.1);
 }
