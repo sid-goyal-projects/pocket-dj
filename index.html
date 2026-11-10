@@ -339,6 +339,7 @@ const shuffle=a=>{ a=[...a]; for(let i=a.length-1;i>0;i--){ const j=Math.floor(M
 /* Last.fm hit list for a vibe: the songs listeners rank highest for its tags. Used to recognise
    which Audius remixes are remixes of real hits. */
 const hitIndexCache={};
+const GENERIC=new Set(['punjabi','bhangra','bollywood','hindi','desi','song','songs','remix','mix','mashup','music','love','the','dj','india','indian','dance','party','beat','new','2']);
 async function hitIndex(v){
   const key=v.tags.join(','); if(hitIndexCache[key]) return hitIndexCache[key];
   const lists=await Promise.all(v.tags.flatMap(t=>[1,2,3].map(pg=>topTracksForTag(t,pg))));
@@ -346,6 +347,7 @@ async function hitIndex(v){
   for(const h of lists.flat()){
     const n=normT(h.name), toks=n.split(' ').filter(w=>w.length>=2);
     if(!(toks.length>=2||n.replace(/ /g,'').length>=7)) continue; // skip short generic titles like "One"
+    if(toks.every(w=>GENERIC.has(w))) continue; // skip titles that are only genre words, like "Punjabi Song"
     const old=seen.get(n); if(!old||h.rank<old.rank) seen.set(n,h);
   }
   return hitIndexCache[key]=[...seen.values()];
