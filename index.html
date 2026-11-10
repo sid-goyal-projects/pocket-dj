@@ -261,9 +261,44 @@ function analyzeCore(x, sr, hint){
 }
 
 
+function stretchCore(chs, ratio, sr){
+  // WSOLA time-stretch: changes tempo by `ratio` (>1 = faster) while keeping pitch.
+  // 46 ms Hann frames, 50% overlap; each new frame is taken from near its nominal input
+  // position at the offset that best lines up with the natural continuation of the last frame.
+  const n=chs[0].length, N=2*Math.round(0.023*sr), Hs=N>>1, Ha=Hs*ratio;
+  const delta=Math.round(0.012*sr), D=8, outLen=Math.floor(n/ratio);
+  const win=new Float32Array(N); for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/N);
+  const mono=new Float32Array(n);
+  if(chs.length>1){ const a=chs[0], b=chs[1]; for(let i=0;i<n;i++) mono[i]=(a[i]+b[i])*0.5; } else mono.set(chs[0]);
+  const nd=Math.floor(n/D), md=new Float32Array(nd);
+  for(let i=0;i<nd;i++){ let s=0; for(let j=0;j<D;j++) s+=mono[i*D+j]; md[i]=s/D; }
+  const out=chs.map(()=>new Float32Array(outLen+N));
+  const L=Hs; // compare the overlap region
+  const corr=(arr,p,q,len,step)=>{ let s=0,e=1e-9; for(let j=0;j<len;j+=step){ const b=arr[q+j]; s+=arr[p+j]*b; e+=b*b; } return s/Math.sqrt(e); };
+  let prev=0;
+  for(let k=0,op=0; op<outLen; k++,op+=Hs){
+    const nominal=Math.round(k*Ha); let pos=nominal;
+    if(k>0){
+      const tgt=prev+Hs, lo=Math.max(0,nominal-delta), hi=Math.min(n-N-1,nominal+delta);
+      if(tgt+L<n&&hi>lo){
+        let best=lo,bs=-1e30;
+        const tD=Math.floor(tgt/D), LD=Math.floor(L/D);
+        for(let p=lo;p<=hi;p+=D){ const pD=Math.floor(p/D); if(pD+LD>=nd||tD+LD>=nd) break; const c=corr(md,tD,pD,LD,1); if(c>bs){bs=c;best=p;} }
+        let fb=best, fs=-1e30;
+        for(let p=Math.max(lo,best-D);p<=Math.min(hi,best+D);p++){ const c=corr(mono,tgt,p,L,2); if(c>fs){fs=c;fb=p;} }
+        pos=fb;
+      }
+    }
+    if(pos+N>n) pos=Math.max(0,n-N);
+    for(let c=0;c<chs.length;c++){ const x=chs[c], o=out[c]; for(let i=0;i<N;i++) o[op+i]+=x[pos+i]*win[i]; }
+    prev=pos;
+  }
+  return out.map(o=>o.subarray(0,outLen).slice());
+}
+
 
 /* ===================== Settings ===================== */
-const DEFAULTS={entry:'dj',lfmKey:'',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true,originals:true};
+const DEFAULTS={entry:'dj',lfmKey:'',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true,originals:true,lock:true,lockMax:0.12};
 let S=Object.assign({},DEFAULTS);
 try{ Object.assign(S,JSON.parse(localStorage.getItem('pdj-settings')||'{}')); }catch(e){}
 if(!S.v03){ S.entry='dj'; S.v03=true; }
@@ -273,7 +308,9 @@ const SETTINGS=[
   {key:'style',label:'Transition',opts:[['blend','Blend + bass swap'],['filter','Filter sweep'],['echo','Echo out'],['cut','Cut on the beat']]},
   {key:'bars',label:'Mix length (when not in DJ mode)',opts:[[4,'4 bars'],[8,'8 bars'],[16,'16 bars'],[32,'32 bars']]},
   {key:'quant',label:'When I press Next, start on',opts:[['bar','Next bar'],['beat','Next beat'],['off','Right away']]},
-  {key:'match',label:'Match tempo',opts:[[true,'On'],[false,'Off']]},
+  {key:'lock',label:'Hold the vibe tempo (party versions)',opts:[[true,'On'],[false,'Off']]},
+  {key:'lockMax',label:'Max tempo change for party versions',opts:[[0.08,'±8%'],[0.12,'±12%'],[0.16,'±16%']]},
+  {key:'match',label:'Match tempo during the mix',opts:[[true,'On'],[false,'Off']]},
   {key:'stretch',label:'Max tempo change',opts:[[0.04,'±4%'],[0.08,'±8%'],[0.12,'±12%']]},
   {key:'auto',label:'Mix automatically near song end',opts:[[true,'On'],[false,'Off']]},
   {key:'awake',label:'Keep screen awake while playing',opts:[[true,'On'],[false,'Off']]},
@@ -287,18 +324,18 @@ function renderSettings(){
   const el=$('settings'); el.innerHTML='';
   for(const s of SETTINGS){ const d=document.createElement('div'); d.className='set'; d.innerHTML='<span class="h">'+s.label+'</span>';
     const seg=document.createElement('div'); seg.className='seg'; d.appendChild(seg); el.appendChild(d);
-    segButtons(seg,s.key,s.opts,()=>{ updateHints(); if(s.key==='awake') wake(); }); }
+    segButtons(seg,s.key,s.opts,()=>{ updateHints(); if(s.key==='awake') wake(); if(s.key==='lock') renderVibes(); }); }
 }
 
 /* ===================== Vibes (Auto DJ brain v0) ===================== */
 const VIBES={
-  chill:{label:'Chill',desc:'Lo-fi, downtempo, soul',genres:['Lo-Fi','Downtempo','R&B/Soul','Deep House'],bpm:[70,120]},
-  warmup:{label:'Warm-up',desc:'Groovy house and disco',genres:['Deep House','House','Disco','Funk'],bpm:[110,124]},
-  party:{label:'Party',desc:'House, pop, dancehall',genres:['House','Tech House','Future House','Pop','Dancehall','Moombahton'],bpm:[116,130]},
-  workout:{label:'Workout',desc:'Trap, D&B, bass music',genres:['Trap','Hip-Hop/Rap','Drum & Bass','Dubstep','Electro','Future Bass'],bpm:[124,178]},
-  latenight:{label:'Late night',desc:'Techno and progressive',genres:['Techno','Deep House','Progressive House','Trance'],bpm:[120,134]},
-  focus:{label:'Focus',desc:'Ambient and lo-fi',genres:['Lo-Fi','Ambient','Downtempo'],bpm:[60,100]},
-  bollywood:{label:'Bollywood',desc:'Remixes and mashups of Hindi and Punjabi hits',search:['bollywood remix','bollywood mashup','hindi remix','punjabi remix','bhangra remix','desi remix','bollywood edit','desi mashup','bollywood bootleg','punjabi mashup'],tags:['bollywood','hindi','punjabi','bhangra'],bpm:[88,135],remixy:true,must:/\b(bollywood|hindi|punjabi|panjabi|bhangra|desi|dhol|indian?|bombay|mumbai|arijit|badshah|diljit|honey singh|sidhu|guru randhawa|neha kakkar|pritam|shah ?rukh|srk|salman|ranveer|kareena|katrina|tum|dil|ishq|pyaar|pyar|yaar|kudi|munda|nach|mahi|sajna|jaan|zindagi|sanam|chura|bhai|kala|chashma|naina|jawani|jalwa|lungi|thumka|ghoomar|desi)\b/i},
+  chill:{label:'Chill',desc:'Lo-fi, downtempo, soul',genres:['Lo-Fi','Downtempo','R&B/Soul','Deep House'],lock:null,bpm:[70,120]},
+  warmup:{label:'Warm-up',desc:'Groovy house and disco',genres:['Deep House','House','Disco','Funk'],lock:118,bpm:[110,124]},
+  party:{label:'Party',desc:'House, pop, dancehall',genres:['House','Tech House','Future House','Pop','Dancehall','Moombahton'],lock:124,bpm:[116,130]},
+  workout:{label:'Workout',desc:'Trap, D&B, bass music',genres:['Trap','Hip-Hop/Rap','Drum & Bass','Dubstep','Electro','Future Bass'],lock:128,bpm:[124,178]},
+  latenight:{label:'Late night',desc:'Techno and progressive',genres:['Techno','Deep House','Progressive House','Trance'],lock:126,bpm:[120,134]},
+  focus:{label:'Focus',desc:'Ambient and lo-fi',genres:['Lo-Fi','Ambient','Downtempo'],lock:null,bpm:[60,100]},
+  bollywood:{label:'Bollywood',desc:'Remixes and mashups of Hindi and Punjabi hits',search:['bollywood remix','bollywood mashup','hindi remix','punjabi remix','bhangra remix','desi remix','bollywood edit','desi mashup','bollywood bootleg','punjabi mashup'],tags:['bollywood','hindi','punjabi','bhangra'],bpm:[88,135],lock:116,remixy:true,must:/\b(bollywood|hindi|punjabi|panjabi|bhangra|desi|dhol|indian?|bombay|mumbai|arijit|badshah|diljit|honey singh|sidhu|guru randhawa|neha kakkar|pritam|shah ?rukh|srk|salman|ranveer|kareena|katrina|tum|dil|ishq|pyaar|pyar|yaar|kudi|munda|nach|mahi|sajna|jaan|zindagi|sanam|chura|bhai|kala|chashma|naina|jawani|jalwa|lungi|thumka|ghoomar|desi)\b/i},
 };
 const CAM={'C major':'8B','G major':'9B','D major':'10B','A major':'11B','E major':'12B','B major':'1B','F# major':'2B','Gb major':'2B','Db major':'3B','C# major':'3B','Ab major':'4B','G# major':'4B','Eb major':'5B','D# major':'5B','Bb major':'6B','A# major':'6B','F major':'7B',
   'A minor':'8A','E minor':'9A','B minor':'10A','F# minor':'11A','Gb minor':'11A','C# minor':'12A','Db minor':'12A','G# minor':'1A','Ab minor':'1A','D# minor':'2A','Eb minor':'2A','A# minor':'3A','Bb minor':'3A','F minor':'4A','C minor':'5A','G minor':'6A','D minor':'7A'};
@@ -384,7 +421,9 @@ async function refillPool(){
     }
     for(const {t,hit} of found){
       if(t.is_streamable===false||!(t.duration>=110&&t.duration<=480)) continue;
-      if(t.bpm&&!(t.bpm>=v.bpm[0]*0.97&&t.bpm<=v.bpm[1]*1.03)&&!(t.bpm*2>=v.bpm[0]&&t.bpm*2<=v.bpm[1])) continue;
+      const lt=lockTarget();
+      if(t.bpm&&lt){ if(tempoGap(t.bpm,lt)>Math.log(1+S.lockMax)+0.02) continue; } // reachable as a party version
+      else if(t.bpm&&!(t.bpm>=v.bpm[0]*0.97&&t.bpm<=v.bpm[1]*1.03)&&!(t.bpm*2>=v.bpm[0]&&t.bpm*2<=v.bpm[1])) continue;
       if(v.must&&!hit&&!v.must.test([t.title,t.tags||'',(t.user&&t.user.name)||''].join(' '))) continue; // stay on vibe
       const tr=fromAudius(t); if(hit) tr.hit=hit;
       if(JUNK.test(tr.name)) continue;
@@ -413,7 +452,11 @@ function rankPool(sim){
   const out=[];
   for(const t of pool.values()){
     if(played.has(t.id)||queue.some(q=>q.id===t.id)||(hitKey(t)&&usedHits.has(hitKey(t)))){ pool.delete(t.id); continue; }
-    let s=(t.bpmHint?tempoGap(t.bpmHint,target)*12:0.8)+(ref?keyDist(ref.keyHint,t.keyHint):0)+Math.random()*0.35;
+    const lt=lockTarget(); let ts;
+    if(!t.bpmHint) ts=0.8;
+    else if(lt){ const g=tempoGap(t.bpmHint,lt); ts=g*4+Math.max(0,g-Math.log(1+S.lockMax))*30; } // must be reachable as a party version
+    else ts=tempoGap(t.bpmHint,target)*12;
+    let s=ts+(ref?keyDist(ref.keyHint,t.keyHint):0)+Math.random()*0.35;
     if(ref&&t.artist===ref.artist) s+=0.8;
     s-=0.25*quality(t);
     if(t.hit) s-=0.6+0.4*Math.max(0,1-t.hit.rank/150);
@@ -480,7 +523,7 @@ function renderVibes(){
   const el=$('vibes'); el.innerHTML='';
   for(const [k,v] of Object.entries(VIBES)){
     const b=document.createElement('button'); b.className='vibe'+(S.vibe===k?' on':'');
-    b.innerHTML='<b>'+v.label+'</b><span>'+v.desc+' · '+v.bpm[0]+'–'+v.bpm[1]+' BPM</span>';
+    b.innerHTML='<b>'+v.label+'</b><span>'+v.desc+' · '+(S.lock&&v.lock?'held at '+v.lock+' BPM':v.bpm[0]+'–'+v.bpm[1]+' BPM')+'</span>';
     b.onclick=()=>startVibe(k); el.appendChild(b);
   }
   segButtons($('autoSeg'),'autodj',[[true,'Add songs for me'],['suggest','Only suggest'],[false,'Off']],()=>{ updateChip(); ensureQueue(); });
@@ -578,7 +621,7 @@ class Deck{
 let worker=null, wq=Promise.resolve();
 function getWorker(){
   if(worker!==null) return worker;
-  try{ const src=analyzeCore.toString()+';onmessage=function(e){postMessage(analyzeCore(e.data.x,e.data.sr,e.data.hint));};';
+  try{ const src=analyzeCore.toString()+'\n'+stretchCore.toString()+';onmessage=function(e){var d=e.data; if(d.type==="stretch"){ var o=stretchCore(d.chs,d.ratio,d.sr); postMessage({out:o},o.map(function(a){return a.buffer;})); } else postMessage(analyzeCore(d.x,d.sr,d.hint)); };';
     worker=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'}))); }catch(e){ worker=false; }
   return worker;
 }
@@ -590,6 +633,21 @@ function runAnalysis(buf,hint){
     w.onmessage=e=>res(e.data); w.onerror=err=>{ err.preventDefault&&err.preventDefault(); rej(err); };
     w.postMessage({x,sr:buf.sampleRate,hint},[x.buffer]); })).catch(()=>{ worker=false; return analyzeCore(mono(buf),buf.sampleRate,hint); });
   wq=job.catch(()=>{}); return job;
+}
+function runStretch(buf,ratio){
+  const make=()=>{ const chs=[]; for(let c=0;c<Math.min(2,buf.numberOfChannels);c++) chs.push(buf.getChannelData(c).slice()); return chs; };
+  const toBuf=out=>{ const b=ctx.createBuffer(out.length,out[0].length,buf.sampleRate); out.forEach((a,c)=>b.copyToChannel(a,c)); return b; };
+  const w=getWorker(); if(!w) return Promise.resolve(toBuf(stretchCore(make(),ratio,buf.sampleRate)));
+  const job=wq.then(()=>new Promise((res,rej)=>{ const chs=make();
+    w.onmessage=e=>res(e.data.out); w.onerror=err=>{ err.preventDefault&&err.preventDefault(); rej(err); };
+    w.postMessage({type:'stretch',chs,ratio,sr:buf.sampleRate},chs.map(a=>a.buffer)); }))
+    .then(toBuf).catch(()=>toBuf(stretchCore(make(),ratio,buf.sampleRate)));
+  wq=job.catch(()=>{}); return job;
+}
+function lockTarget(){ const v=S.vibe&&VIBES[S.vibe]; return S.lock&&v&&v.lock?v.lock:null; }
+function partyRatio(bpm,tgt){
+  let best=null; for(const f of [1,2,0.5]){ const r=tgt/(bpm*f); if(best===null||Math.abs(Math.log(r))<Math.abs(Math.log(best))) best=r; }
+  return Math.max(1-S.lockMax,Math.min(1+S.lockMax,best));
 }
 function decode(ab){ return new Promise((res,rej)=>{ const p=ctx.decodeAudioData(ab,res,rej); if(p&&p.catch) p.catch(rej); }); }
 async function loadBytes(tr){
@@ -604,10 +662,21 @@ function prepare(tr){
   initAudio(); tr.status='loading'; renderQueue();
   tr.promise=(async()=>{
     try{
-      const ab=await loadBytes(tr); tr.buffer=await decode(ab);
-      if(tr.buffer.duration>900) throw new Error('too long');
-      if(!tr.an) tr.an=await runAnalysis(tr.buffer,tr.bpmHint||0);
-      tr.status='ready';
+      const ab=await loadBytes(tr); let buf=await decode(ab);
+      if(buf.duration>900) throw new Error('too long');
+      if(tr.an&&tr.ratio&&Math.abs(tr.ratio-1)>0.004){ buf=await runStretch(buf,tr.ratio); } // reloaded after being freed: rebuild the same party version
+      else if(!tr.an){
+        const an0=await runAnalysis(buf,tr.bpmHint||0), tgt=lockTarget();
+        tr.origBpm=an0.reliable?an0.bpm:null; tr.ratio=1; tr.an=an0;
+        if(tgt&&an0.reliable&&buf.duration<=480){
+          const r=partyRatio(an0.bpm,tgt);
+          if(Math.abs(r-1)>0.004){
+            tr.status='stretching'; tr.stretchTo=an0.bpm*r; renderQueue(); updateHints();
+            buf=await runStretch(buf,r); tr.ratio=r; tr.an=await runAnalysis(buf,an0.bpm*r);
+          }
+        }
+      }
+      tr.buffer=buf; tr.status='ready';
     }catch(e){ console.error(e); tr.status='error'; tr.buffer=null; }
     tr.promise=null; renderQueue(); updateHints(); return tr;
   })();
@@ -821,7 +890,7 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 const fmt=s=>{ if(!isFinite(s)||s<0) s=0; const m=Math.floor(s/60), x=Math.floor(s%60); return m+':'+String(x).padStart(2,'0'); };
 function setStatus(t){ $('status').innerHTML=t; }
 function bpmOf(t){ if(t.an) return t.an.reliable?t.an.bpm:null; return t.bpmHint; }
-function metaText(t){ const b=bpmOf(t); return [b?(+b).toFixed(0)+' BPM':(t.an?'no steady beat':''), t.keyHint||''].filter(Boolean).join(' · '); }
+function metaText(t){ const b=bpmOf(t); const pv=t.ratio&&Math.abs(t.ratio-1)>0.004&&t.origBpm?' (party version of '+t.origBpm.toFixed(0)+')':''; return [b?(+b).toFixed(0)+' BPM'+pv:(t.an?'no steady beat':''), t.keyHint||''].filter(Boolean).join(' · '); }
 function artCss(el,t){ el.style.backgroundImage=t&&t.art?'url("'+t.art+'")':''; }
 function subHtml(t){
   const by=t.source==='audius'?'<a href="'+esc(t.link)+'" target="_blank" rel="noopener">'+esc(t.artist)+'</a>':'Your file';
@@ -835,7 +904,7 @@ function updateHints(){
   const nt=nextTrack();
   $('nextTitle').textContent=nt?nt.name:'—'; artCss($('nextArt'),nt);
   if(nt){
-    $('nextSub').innerHTML=subHtml(nt)+(nt.an?' · in at '+fmt(entryTime(nt)):nt.status==='loading'?' · loading…':'')+(nt.why?'<br><span style="color:#a7d9d1">'+esc(nt.why)+'</span>':'');
+    $('nextSub').innerHTML=subHtml(nt)+(nt.an&&nt.status!=='stretching'?' · in at '+fmt(entryTime(nt)):nt.status==='loading'?' · loading…':nt.status==='stretching'?' · making a party version…':'')+(nt.why?'<br><span style="color:#a7d9d1">'+esc(nt.why)+'</span>':'');
     $('nextHint').innerHTML=nt.an?(nt.cue!=null?'Using your start point. <a id="clearCue">Clear it</a>':'Tap the waveform to choose where it comes in.'):'';
     const c=$('clearCue'); if(c) c.onclick=()=>{ nt.cue=null; updateHints(); };
   }else{ $('nextSub').textContent=''; $('nextHint').textContent=S.autodj&&S.vibe?'Finding the next song…':'Queue is empty after this song.'; }
@@ -855,7 +924,7 @@ function renderQueue(){
   const ni=nowTrack?idx(nowTrack):-1, nx=nextTrack();
   queue.forEach((t,i)=>{
     const locked=t===nowTrack||(mixing&&t===mixing.nextTr);
-    const st=t.status==='loading'?' · loading…':t.status==='error'?' · could not load':'';
+    const st=t.status==='loading'?' · loading…':t.status==='stretching'?' · making a party version…':t.status==='error'?' · could not load':'';
     const past=ni>=0&&i<ni, minI=ni+(mixing?2:1);
     el.appendChild(trackRow(t,{cls:(t===nowTrack?' now':'')+(t===nx?' nx':'')+(past?' played':''),extra:(t.auto&&!past&&!locked?' · <span style="color:#35d0ba">AI pick</span>':'')+st,buttons:[
       ['Mix in',()=>{ t.auto=false; moveNext(t); mixNext(t); },locked||past||t.status==='error'],
@@ -916,7 +985,7 @@ function drawWave(cv,tr,pos,markers,color){
   const dpr=window.devicePixelRatio||1, w=Math.max(1,Math.round(cv.clientWidth*dpr)), h=Math.max(1,Math.round(cv.clientHeight*dpr));
   if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h; }
   const g=cv.getContext('2d'); g.clearRect(0,0,w,h);
-  if(!tr||!tr.an){ if(tr&&tr.status==='loading'){ g.fillStyle='#4a5060'; g.font=(12*dpr)+'px system-ui'; g.fillText('Loading and finding the beat…',10*dpr,h/2+4*dpr); } return; }
+  if(!tr||!tr.an||tr.status==='stretching'){ if(tr&&(tr.status==='loading'||tr.status==='stretching')){ g.fillStyle='#4a5060'; g.font=(12*dpr)+'px system-ui'; g.fillText(tr.status==='stretching'?'Making a party version at '+Math.round(tr.stretchTo)+' BPM…':'Loading and finding the beat…',10*dpr,h/2+4*dpr); } return; }
   const an=tr.an, dur=an.dur, cols=an.wF.length, mid=h/2, step=Math.max(1,Math.round(2*dpr));
   for(let x=0;x<w;x+=step){
     const c=Math.min(cols-1,Math.floor(x/w*cols)), t=x/w*dur, pl=pos!=null&&t<pos;
