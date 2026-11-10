@@ -58,6 +58,7 @@ function analyzeCore(x, sr, hint){
       if(s>fS){fS=s;fPh=ph;}
     }
     conf=bSc/(bMean||1e-9); reliable=conf>2.3;
+    if(!reliable&&hint>40&&conf>1.5){ const b=60*fps/bP; let d=9; for(const f of [1,2,0.5]) d=Math.min(d,Math.abs(Math.log(b/(hint*f)))); if(d<0.02) reliable=true; } // two independent estimates agree
     beatSec=bP/fps; beat0=fPh/fps; bpm=60/beatSec;
     if(reliable){
       const nb=Math.floor((nf-2-fPh)/bP), sc=[0,0,0,0];
