@@ -28,6 +28,7 @@ h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.01em}
 .tinfo{min-width:0;flex:1}
 .lbl{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
 .now .lbl b{color:var(--a)} .nextc .lbl b{color:var(--b)}
+.nextc .sub{white-space:normal}
 .lbl b{font-weight:600}
 .ttl{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sub{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -113,7 +114,11 @@ input[type=range]{width:100%;accent-color:var(--a)}
     <div class="vibes" id="vibes"></div>
     <div class="set"><span class="h">Auto DJ</span>
       <div class="seg" id="autoSeg"></div>
-      <div class="muted" style="margin-top:6px">When on, Pocket DJ keeps a few songs queued that fit the vibe, picks ones close in tempo and key to what is playing, and mixes them in by itself.</div>
+      <div class="muted" style="margin-top:6px">When on, Pocket DJ keeps a few songs queued that fit the vibe, picks ones close in tempo and key to what is playing, and mixes them in by itself. Songs you skip in the first 40 seconds count against that artist and song.</div>
+    </div>
+    <div class="set"><span class="h">Last.fm listening data</span>
+      <form class="srow" id="lfmForm"><input type="text" id="lfmKey" placeholder="Paste your Last.fm API key" autocomplete="off" spellcheck="false"><button type="submit">Save</button></form>
+      <div class="muted" id="lfmStatus"></div>
     </div>
   </section>
 
@@ -144,16 +149,23 @@ function analyzeCore(x, sr){
   const w0=2*Math.PI*140/sr, cs=Math.cos(w0), al=Math.sin(w0)/(2*0.7071), a0=1+al;
   const b0=(1-cs)/2/a0, b1=(1-cs)/a0, b2=b0, a1=-2*cs/a0, a2=(1-al)/a0;
   let x1=0,x2=0,y1=0,y2=0,u1=0,u2=0,z1=0,z2=0;
-  const aF=new Float32Array(nf), aL=new Float32Array(nf);
+  const coef=(type,f0)=>{ const w=2*Math.PI*f0/sr, c=Math.cos(w), a=Math.sin(w)/(2*0.7071), n0=1+a;
+    return type==='hp'?[(1+c)/2/n0,-(1+c)/n0,(1+c)/2/n0,-2*c/n0,(1-a)/n0]:[(1-c)/2/n0,(1-c)/n0,(1-c)/2/n0,-2*c/n0,(1-a)/n0]; };
+  const H=coef('hp',400), Lp=coef('lp',3000);
+  let h1=0,h2=0,hy1=0,hy2=0,m1=0,m2=0,my1=0,my2=0;
+  const aF=new Float32Array(nf), aL=new Float32Array(nf), aM=new Float32Array(nf);
   for(let f=0;f<nf;f++){
-    let sF=0,sL=0; const o=f*hop;
+    let sF=0,sL=0,sM=0; const o=f*hop;
     for(let i=0;i<hop;i++){
       const v=x[o+i]; sF+=v*v;
       const y=b0*v+b1*x1+b2*x2-a1*y1-a2*y2; x2=x1;x1=v;y2=y1;y1=y;
       const z=b0*y+b1*u1+b2*u2-a1*z1-a2*z2; u2=u1;u1=y;z2=z1;z1=z;
       sL+=z*z;
+      const hy=H[0]*v+H[1]*h1+H[2]*h2-H[3]*hy1-H[4]*hy2; h2=h1;h1=v;hy2=hy1;hy1=hy;
+      const my=Lp[0]*hy+Lp[1]*m1+Lp[2]*m2-Lp[3]*my1-Lp[4]*my2; m2=m1;m1=hy;my2=my1;my1=my;
+      sM+=my*my;
     }
-    aF[f]=Math.sqrt(sF/hop); aL[f]=Math.sqrt(sL/hop);
+    aF[f]=Math.sqrt(sF/hop); aL[f]=Math.sqrt(sL/hop); aM[f]=Math.sqrt(sM/hop);
   }
   let mF=1e-9,mL=1e-9; for(let f=0;f<nf;f++){ if(aF[f]>mF)mF=aF[f]; if(aL[f]>mL)mL=aL[f]; }
   // onset strength
@@ -205,17 +217,21 @@ function analyzeCore(x, sr){
   }
   if(!reliable){ barT=[]; for(let t=0;t<dur;t+=2) barT.push(t); }
   if(barT.length<2) barT=[0,dur/2];
-  const nbars=barT.length, barE=new Float32Array(nbars);
+  const nbars=barT.length, barE=new Float32Array(nbars), barM=new Float32Array(nbars);
   for(let j=0;j<nbars;j++){
     const a=Math.floor(barT[j]*fps), b=Math.min(nf,Math.floor((j+1<nbars?barT[j+1]:dur)*fps));
-    let s=0; for(let f=a;f<b;f++) s+=aF[f]; barE[j]=b>a?s/(b-a):0;
+    let s=0,sm=0; for(let f=a;f<b;f++){ s+=aF[f]; sm+=aM[f]; } barE[j]=b>a?s/(b-a):0; barM[j]=b>a?sm/(b-a):0;
   }
-  const sorted=Array.from(barE).sort((p,q)=>p-q), p80=sorted[Math.floor(sorted.length*0.8)]||1e-9;
+  const pct=(arr,q)=>{ const so=Array.from(arr).sort((p,r)=>p-r); return so[Math.floor(so.length*q)]||1e-9; };
+  const p80=pct(barE,0.8), m80=pct(barM,0.8);
+  const avgM=(a,b)=>{a=Math.max(0,a);b=Math.min(nbars,b);if(b<=a)return 0;let s=0;for(let j=a;j<b;j++)s+=barM[j];return s/(b-a);};
   const avg=(a,b)=>{a=Math.max(0,a);b=Math.min(nbars,b);if(b<=a)return 0;let s=0;for(let j=a;j<b;j++)s+=barE[j];return s/(b-a);};
   const barIdx=sec=>{for(let j=0;j<nbars;j++) if(barT[j]>=sec) return j; return nbars-1;};
-  let startBar=0; while(startBar<nbars-1 && barE[startBar]<0.1*p80) startBar++;
+  let startBar=0; while(startBar<nbars-1 && barE[startBar]<0.03*p80) startBar++;
   let introBar=startBar;
-  for(let j=startBar;j<nbars*0.45;j++){ if(avg(j,j+4)>=0.72*p80){introBar=j;break;} }
+  // the intro ends when the track is both loud and full in the vocal/melody range
+  for(let j=startBar;j<nbars*0.45;j++){ if(avg(j,j+4)>=0.72*p80&&avgM(j,j+4)>=0.6*m80){introBar=j;break;} }
+  if(reliable){ const L=introBar-startBar, r8=Math.round(L/8)*8; if(r8>0&&Math.abs(L-r8)<=2&&startBar+r8<nbars) introBar=startBar+r8; }
   let dropBar=introBar, dS=-1;
   const jMin=Math.max(4,introBar+4,barIdx(15)), jMax=Math.floor(nbars*0.7);
   for(let j=jMin;j<=jMax;j++){
@@ -238,14 +254,15 @@ function analyzeCore(x, sr){
 
 
 /* ===================== Settings ===================== */
-const DEFAULTS={entry:'intro',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true};
+const DEFAULTS={entry:'dj',lfmKey:'',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true};
 let S=Object.assign({},DEFAULTS);
 try{ Object.assign(S,JSON.parse(localStorage.getItem('pdj-settings')||'{}')); }catch(e){}
+if(!S.v03){ S.entry='dj'; S.v03=true; }
 function saveSettings(){ try{ localStorage.setItem('pdj-settings',JSON.stringify(S)); }catch(e){} }
 const SETTINGS=[
-  {key:'entry',label:'Start the next song at',opts:[['start','The beginning'],['intro','After the intro'],['drop','The drop / chorus']]},
+  {key:'entry',label:'Start the next song',opts:[['dj','Like a DJ (phrase match)'],['start','From the beginning'],['intro','After the intro'],['drop','At the drop / chorus']]},
   {key:'style',label:'Transition',opts:[['blend','Blend + bass swap'],['filter','Filter sweep'],['echo','Echo out'],['cut','Cut on the beat']]},
-  {key:'bars',label:'Mix length',opts:[[4,'4 bars'],[8,'8 bars'],[16,'16 bars'],[32,'32 bars']]},
+  {key:'bars',label:'Mix length (when not in DJ mode)',opts:[[4,'4 bars'],[8,'8 bars'],[16,'16 bars'],[32,'32 bars']]},
   {key:'quant',label:'When I press Next, start on',opts:[['bar','Next bar'],['beat','Next beat'],['off','Right away']]},
   {key:'match',label:'Match tempo',opts:[[true,'On'],[false,'Off']]},
   {key:'stretch',label:'Max tempo change',opts:[[0.04,'±4%'],[0.08,'±8%'],[0.12,'±12%']]},
@@ -272,6 +289,7 @@ const VIBES={
   workout:{label:'Workout',desc:'Trap, D&B, bass music',genres:['Trap','Hip-Hop/Rap','Drum & Bass','Dubstep','Electro','Future Bass'],bpm:[124,178]},
   latenight:{label:'Late night',desc:'Techno and progressive',genres:['Techno','Deep House','Progressive House','Trance'],bpm:[120,134]},
   focus:{label:'Focus',desc:'Ambient and lo-fi',genres:['Lo-Fi','Ambient','Downtempo'],bpm:[60,100]},
+  bollywood:{label:'Bollywood',desc:'Remixes and mashups of Hindi and Punjabi hits',search:['bollywood remix','bollywood mashup','hindi remix','punjabi remix','bhangra remix','desi remix'],tags:['bollywood','hindi','punjabi','bhangra'],bpm:[88,135],remixy:true},
 };
 const CAM={'C major':'8B','G major':'9B','D major':'10B','A major':'11B','E major':'12B','B major':'1B','F# major':'2B','Gb major':'2B','Db major':'3B','C# major':'3B','Ab major':'4B','G# major':'4B','Eb major':'5B','D# major':'5B','Bb major':'6B','A# major':'6B','F major':'7B',
   'A minor':'8A','E minor':'9A','B minor':'10A','F# minor':'11A','Gb minor':'11A','C# minor':'12A','Db minor':'12A','G# minor':'1A','Ab minor':'1A','D# minor':'2A','Eb minor':'2A','A# minor':'3A','Bb minor':'3A','F minor':'4A','C minor':'5A','G minor':'6A','D minor':'7A'};
@@ -282,33 +300,111 @@ function keyDist(a,b){
   if(x===y) return 0; if(d===0) return 0.15; if(d===1&&x.slice(-1)===y.slice(-1)) return 0.1; return Math.min(1,0.4+d*0.1);
 }
 function tempoGap(a,b){ let g=9; for(const f of [1,2,0.5]) g=Math.min(g,Math.abs(Math.log(a*f/b))); return g; }
-const pool=new Map(); const played=new Set(); let poolBusy=false, poolFor=null;
+const pool=new Map(); const played=new Set(); const playedHits=new Set(); let poolBusy=false, poolFor=null;
+const normT=x=>String(x||'').toLowerCase().replace(/\(.*?\)|\[.*?\]/g,' ').replace(/[^a-z0-9ऀ-ॿ ]+/g,' ').replace(/\s+/g,' ').trim();
+function titleHas(title,name){ const T=' '+normT(title)+' '; const toks=normT(name).split(' ').filter(w=>w.length>=2); return toks.length>0&&toks.every(w=>T.includes(' '+w+' ')); }
+const JUNK=/(\d{2,3}\s?k(bps)?\)|\bmp3\b|djpunjab|pagalworld|mr-?jatt|mp3cut|\.com\b|ringtone|whatsapp|status video|lyrical|full (song|video)|official (video|audio)|_\w+_)/i;
+const REMIXY=/\b(remix|mashup|edit|bootleg|flip|vip|rework|club mix|dj )\b/i;
+function quality(t){
+  const q=Math.log10(1+(t.plays||0))+1.5*Math.log10(1+(t.favs||0))+Math.log10(1+(t.reposts||0));
+  return q+(REMIXY.test(t.name)?0.6:0)-(JUNK.test(t.name)?4:0);
+}
+/* listening data from Last.fm: which songs are hits, and which go together */
+const LFM='https://ws.audioscrobbler.com/2.0/', lfmCache=new Map();
+const lfmKey=()=>(S.lfmKey||'').trim();
+function lfm(method,params){
+  const k=lfmKey(); if(!k) return Promise.resolve(null);
+  const u=new URL(LFM); u.searchParams.set('method',method);
+  for(const [a,b] of Object.entries(params)) u.searchParams.set(a,b);
+  u.searchParams.set('api_key',k); u.searchParams.set('format','json');
+  const key=u.toString(); if(lfmCache.has(key)) return lfmCache.get(key);
+  const pr=fetch(u).then(r=>r.json()).then(j=>{ if(j.error) throw new Error(j.message); return j; })
+    .catch(e=>{ console.warn('Last.fm',e.message); lfmCache.delete(key); lfmStatus='Last.fm error: '+e.message; renderLfm(); return null; });
+  lfmCache.set(key,pr); return pr;
+}
+async function topTracksForTag(tag,page){
+  const j=await lfm('tag.gettoptracks',{tag,limit:50,page});
+  const arr=j&&j.tracks&&j.tracks.track||[];
+  if(arr.length){ lfmStatus='Connected. Using Last.fm listening data.'; renderLfm(); }
+  return arr.map((t,i)=>({name:t.name,artist:t.artist&&t.artist.name,rank:(page-1)*50+i+1,tag}));
+}
+async function similarTo(hit){
+  if(!hit) return new Map();
+  const j=await lfm('track.getsimilar',{artist:hit.artist,track:hit.name,limit:60,autocorrect:1});
+  const m=new Map(); for(const t of (j&&j.similartracks&&j.similartracks.track)||[]) m.set(normT(t.name),+t.match||0.1);
+  return m;
+}
+const shuffle=a=>{ a=[...a]; for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; };
+async function candidatesForSearchVibe(v){
+  const found=[];
+  if(lfmKey()){ // start from songs people actually love, then find DJ remixes of them on Audius
+    const tag=shuffle(v.tags)[0], page=1+Math.floor(Math.random()*3);
+    const hits=shuffle(await topTracksForTag(tag,page)).slice(0,7);
+    const res=await Promise.all(hits.map(h=>api('/tracks/search',{query:h.name+(v.remixy?' remix':''),sort_method:'popular',limit:10})
+      .then(d=>d.filter(t=>titleHas(t.title,h.name)).map(t=>({t,hit:h}))).catch(()=>[])));
+    found.push(...res.flat());
+  }
+  const qs=shuffle(v.search).slice(0,lfmKey()?1:3);
+  const res2=await Promise.all(qs.map(q=>api('/tracks/search',{query:q,sort_method:'popular',limit:40}).catch(()=>[])));
+  for(const t of res2.flat()) found.push({t,hit:null});
+  return found;
+}
 async function refillPool(){
   const v=VIBES[S.vibe]; if(!v||poolBusy) return; poolBusy=true;
   try{
     if(poolFor!==S.vibe){ pool.clear(); poolFor=S.vibe; }
-    const gs=[...v.genres].sort(()=>Math.random()-0.5).slice(0,2);
-    const lists=await Promise.all(gs.map(g=>api('/tracks/trending',{genre:g,time:Math.random()<0.5?'month':'allTime',limit:60}).catch(()=>[])));
-    for(const t of lists.flat()){
+    let found;
+    if(v.search) found=await candidatesForSearchVibe(v);
+    else{
+      const gs=shuffle(v.genres).slice(0,2);
+      const lists=await Promise.all(gs.map(g=>api('/tracks/trending',{genre:g,time:Math.random()<0.5?'month':'allTime',limit:60}).catch(()=>[])));
+      found=lists.flat().map(t=>({t,hit:null}));
+    }
+    for(const {t,hit} of found){
       if(t.is_streamable===false||!(t.duration>=110&&t.duration<=480)) continue;
       if(t.bpm&&!(t.bpm>=v.bpm[0]*0.97&&t.bpm<=v.bpm[1]*1.03)&&!(t.bpm*2>=v.bpm[0]&&t.bpm*2<=v.bpm[1])) continue;
-      const tr=fromAudius(t); if(!played.has(tr.id)&&!queue.some(q=>q.id===tr.id)) pool.set(tr.id,tr);
+      const tr=fromAudius(t); if(hit) tr.hit=hit;
+      if(JUNK.test(tr.name)) continue;
+      if(played.has(tr.id)||queue.some(q=>q.id===tr.id)) continue;
+      const old=pool.get(tr.id); if(!old||(!old.hit&&tr.hit)) pool.set(tr.id,tr);
     }
   }finally{ poolBusy=false; }
 }
-function pickFromPool(){
+/* what you skip teaches it what to avoid */
+let dislikes={}; try{ dislikes=JSON.parse(localStorage.getItem('pdj-dislikes')||'{}'); }catch(e){}
+function noteSkip(tr){
+  if(!tr) return;
+  const ks=['a:'+(tr.artist||'')]; if(tr.hit) ks.push('h:'+normT(tr.hit.name));
+  for(const k of ks) dislikes[k]=(dislikes[k]||0)+1;
+  try{ localStorage.setItem('pdj-dislikes',JSON.stringify(dislikes)); }catch(e){}
+}
+function dislikePenalty(t){ return 0.7*(dislikes['a:'+(t.artist||'')]||0)+1.0*(t.hit?(dislikes['h:'+normT(t.hit.name)]||0):0); }
+function hitKey(t){ return t.hit?normT(t.hit.name):null; }
+function pickFromPool(sim){
   const ref=lastQueued(), v=VIBES[S.vibe];
   const refBpm=ref?((ref.an&&ref.an.reliable)?ref.an.bpm:ref.bpmHint):null;
   const target=refBpm||((v.bpm[0]+v.bpm[1])/2);
+  const usedHits=new Set([...playedHits,...queue.map(hitKey).filter(Boolean)]);
   let best=null,bs=1e9;
   for(const t of pool.values()){
-    if(played.has(t.id)||queue.some(q=>q.id===t.id)) { pool.delete(t.id); continue; }
+    if(played.has(t.id)||queue.some(q=>q.id===t.id)||(hitKey(t)&&usedHits.has(hitKey(t)))){ pool.delete(t.id); continue; }
     let s=(t.bpmHint?tempoGap(t.bpmHint,target)*12:0.8)+(ref?keyDist(ref.keyHint,t.keyHint):0)+Math.random()*0.35;
     if(ref&&t.artist===ref.artist) s+=0.8;
+    s-=0.25*quality(t);
+    if(t.hit) s-=0.6+0.4*Math.max(0,1-t.hit.rank/150);
+    if(sim&&t.hit&&sim.has(normT(t.hit.name))) s-=1.2*Math.min(1,sim.get(normT(t.hit.name))+0.3);
+    s+=dislikePenalty(t);
     if(s<bs){bs=s;best=t;}
   }
-  if(best) pool.delete(best.id);
+  if(best){ pool.delete(best.id); best.why=whyText(best,sim); }
   return best;
+}
+function whyText(t,sim){
+  const bits=[];
+  if(t.hit) bits.push('remix of “'+t.hit.name+'”'+(t.hit.artist?' by '+t.hit.artist:'')+(t.hit.rank<=150?' · #'+t.hit.rank+' '+t.hit.tag+' on Last.fm':''));
+  if(sim&&t.hit&&sim.has(normT(t.hit.name))) bits.push('fans of the last song also play it');
+  if(!t.hit&&(t.plays||0)>2000) bits.push(Math.round(t.plays/1000)+'k plays on Audius');
+  return bits.join(' · ');
 }
 function lastQueued(){ return queue.length?queue[queue.length-1]:nowTrack; }
 let fillBusy=false;
@@ -319,7 +415,8 @@ async function ensureQueue(){
     let guard=0;
     while(ahead()<3&&guard++<6){
       if(pool.size<4) await refillPool();
-      const t=pickFromPool(); if(!t){ if(pool.size===0) break; continue; }
+      const ref=lastQueued(); const sim=ref&&ref.hit?await similarTo(ref.hit):null;
+      const t=pickFromPool(sim); if(!t){ if(pool.size===0) break; continue; }
       queue.push(t);
     }
     prepareAhead();
@@ -360,7 +457,7 @@ async function api(path,params={}){
 }
 function fromAudius(t,auto=true){
   return {id:'a'+t.id,source:'audius',audiusId:t.id,name:t.title,artist:(t.user&&t.user.name)||'',art:(t.artwork&&(t.artwork['150x150']||t.artwork['480x480']))||'',
-    link:'https://audius.co'+(t.permalink||''),bpmHint:t.bpm||null,keyHint:t.musical_key||null,genre:t.genre,dur:t.duration,auto,
+    link:'https://audius.co'+(t.permalink||''),plays:t.play_count||0,favs:t.favorite_count||0,reposts:t.repost_count||0,bpmHint:t.bpm||null,keyHint:t.musical_key||null,genre:t.genre,dur:t.duration,auto,
     buffer:null,an:null,status:'queued',cue:null,promise:null};
 }
 
@@ -493,25 +590,38 @@ function localOffset(an,pos,win=6){
 function nextBarAfter(an,p){ for(const t of an.barT) if(t>=p) return t; return null; }
 function nearestBar(an,p){ let b=an.barT[0]; for(const t of an.barT) if(Math.abs(t-p)<Math.abs(b-p)) b=t; return b; }
 function barAtOrBefore(an,p){ let b=an.barT[0]; for(const t of an.barT){ if(t<=p) b=t; else break; } return b; }
+/* DJ mode: rules from research on real DJ mixes. DJs cue on phrase boundaries (8-bar blocks),
+   play a mixable intro over the outgoing outro so the new track's main part lands as the old one ends,
+   and keep short overlaps for songs without a DJ-friendly intro. */
+const PHRASE=8;
+function djInfo(an){
+  const introBars=an.introBar-an.startBar, longIntro=an.reliable&&introBars>=8;
+  return {longIntro, entryBar:longIntro?an.startBar:an.introBar, mixBars:longIntro?Math.min(32,Math.floor(introBars/PHRASE)*PHRASE):8};
+}
+function isPhrase(an,j){ return j>=an.startBar&&(j-an.startBar)%PHRASE===0; }
+function nextPhraseAfter(an,p){ for(let j=0;j<an.barT.length;j++) if(an.barT[j]>=p&&isPhrase(an,j)) return an.barT[j]; return null; }
+function phraseAtOrBefore(an,p){ let b=null; for(let j=0;j<an.barT.length;j++){ if(an.barT[j]>p) break; if(isPhrase(an,j)) b=an.barT[j]; } return b==null?an.barT[0]:b; }
 function entryTime(tr){
   const an=tr.an; if(tr.cue!=null) return tr.cue;
+  if(S.entry==='dj') return an.barT[djInfo(an).entryBar]||0;
   if(S.entry==='start'&&!an.reliable) return 0;
   const j=S.entry==='start'?an.startBar:S.entry==='intro'?an.introBar:an.dropBar;
   return an.barT[j]||0;
 }
 function fallbackSec(){ return {4:4,8:8,16:12,32:16}[S.bars]||8; }
-function mixLen(an,r){ return an.reliable?S.bars*4*an.beatSec/r:fallbackSec(); }
-function autoMixPos(d){
-  const an=d.track.an, dur=d.dur, r=d.rateAt(ctx.currentTime), Dt=mixLen(an,r)*r;
+function mixBarsFor(nt){ return S.entry==='dj'&&nt&&nt.an&&nt.cue==null&&nt.an.reliable?djInfo(nt.an).mixBars:S.bars; }
+function mixLen(an,r,nt){ return an.reliable?mixBarsFor(nt)*4*an.beatSec/r:fallbackSec(); }
+function autoMixPos(d,nt){
+  const an=d.track.an, dur=d.dur, r=d.rateAt(ctx.currentTime), Dt=mixLen(an,r,nt)*r;
   let end=an.outroBar+1>=an.barT.length?dur:an.barT[an.outroBar+1];
   end=Math.min(end,dur-0.3);
-  let p=end-Dt; if(an.reliable) p=barAtOrBefore(an,p);
+  let p=end-Dt; if(an.reliable) p=S.entry==='dj'?phraseAtOrBefore(an,p):barAtOrBefore(an,p);
   return Math.max(p,Math.min(30,dur*0.5));
 }
 const eq=(n,up)=>{ const a=new Float32Array(n); for(let i=0;i<n;i++){ const x=i/(n-1)*Math.PI/2; a[i]=up?Math.sin(x):Math.cos(x);} return a; };
 
 /* ---------- transitions ---------- */
-function doTransition(nt){
+function doTransition(nt,auto){
   const now=ctx.currentTime, A=decks[cur], B=decks[1-cur];
   if(!A.src){ startTrack(nt,0); return; }
   const ta=A.track.an, tb=nt.an;
@@ -529,13 +639,15 @@ function doTransition(nt){
   let T=now+lead;
   if(ta.reliable&&S.quant!=='off'){
     const off=localOffset(ta,posA), minPos=posA+lead*rA; let g=null;
-    if(S.quant==='bar'){ const b=nextBarAfter(ta,minPos-off); g=b==null?null:b+off; }
+    if(S.quant==='bar'){ const b=nextBarAfter(ta,minPos-off); g=b==null?null:b+off;
+      if(S.entry==='dj'){ const ph=nextPhraseAfter(ta,minPos-off); // wait for the phrase if it is close, or always when mixing on its own
+        if(ph!=null&&g!=null&&(auto||(ph+off-g)<=2*4*ta.beatSec+0.01)) g=ph+off; } }
     else { const k=Math.ceil((minPos-off-ta.beat0)/ta.beatSec); g=ta.beat0+k*ta.beatSec+off; }
     if(g!=null&&g<durA-0.3) T=now+(g-posA)/rA;
   }
   const beatReal=ta.reliable?ta.beatSec/rA:0.5, remA=(durA-A.posAt(T))/rA;
   let style=S.style; if(remA<0.6) style='cut';
-  let D=Math.max(0.05,Math.min(mixLen(ta,rA),remA-0.05));
+  let D=Math.max(0.05,Math.min(mixLen(ta,rA,nt),remA-0.05));
   if(style==='blend'&&D<3) style='fade';
   let end; A.reset(now);
   if(style==='blend'){
@@ -572,7 +684,7 @@ function doTransition(nt){
 function finishMix(){
   const m=mixing; mixing=null;
   m.A.stopNow(); const old=m.A.track; m.A.track=null;
-  cur=decks.indexOf(m.B); nowTrack=m.nextTr; played.add(nowTrack.id);
+  cur=decks.indexOf(m.B); nowTrack=m.nextTr; played.add(nowTrack.id); if(hitKey(nowTrack)) playedHits.add(hitKey(nowTrack));
   release(old); prepareAhead(); setMeta(); ensureQueue();
   if(queuedNext){ queuedNext=false; setTimeout(()=>mixNext(),0); }
 }
@@ -580,7 +692,7 @@ function startTrack(tr,offset){
   const d=decks[cur], t=ctx.currentTime+0.05;
   for(const x of decks) if(x!==d){ x.stopNow(); x.track=null; }
   d.reset(ctx.currentTime); d.play(tr,t,offset||0,1);
-  nowTrack=tr; played.add(tr.id); endedQueue=false; prepareAhead(); setMeta(); ensureQueue(); wake();
+  nowTrack=tr; played.add(tr.id); if(hitKey(tr)) playedHits.add(hitKey(tr)); endedQueue=false; prepareAhead(); setMeta(); ensureQueue(); wake();
 }
 
 /* ---------- user actions ---------- */
@@ -609,6 +721,7 @@ async function mixNext(chosen){
   if(mixing){ if(!chosen) queuedNext=true; return; }
   if(pendingMix) return;
   if(ctx.state!=='running') await ctx.resume();
+  if(!chosen&&nowTrack&&nowTrack.auto&&ctx.currentTime-decks[cur].startedAt<40) noteSkip(nowTrack);
   let nt=chosen||nextTrack();
   if(!nt){ await ensureQueue(); nt=nextTrack(); }
   if(!nt){ setStatus('Nothing queued. Pick a vibe or search for songs.'); return; }
@@ -627,7 +740,7 @@ setInterval(()=>{
   const d=decks[cur]; if(!d.src||!d.track) return;
   const pos=d.posAt(now), nt=nextTrack();
   if(S.auto&&!pendingMix&&nt&&nt.buffer&&nt.an&&now-d.startedAt>8){
-    if(pos>=autoMixPos(d)-0.4*d.rateAt(now)){ doTransition(nt); return; }
+    if(pos>=autoMixPos(d,nt)-0.4*d.rateAt(now)){ doTransition(nt,true); return; }
   }
   if(pos>=d.dur-0.02){
     if(nt&&nt.buffer&&nt.an){ d.stopNow(); startTrack(nt,0); }
@@ -667,7 +780,7 @@ function updateHints(){
   const nt=nextTrack();
   $('nextTitle').textContent=nt?nt.name:'—'; artCss($('nextArt'),nt);
   if(nt){
-    $('nextSub').innerHTML=subHtml(nt)+(nt.an?' · in at '+fmt(entryTime(nt)):nt.status==='loading'?' · loading…':'');
+    $('nextSub').innerHTML=subHtml(nt)+(nt.an?' · in at '+fmt(entryTime(nt)):nt.status==='loading'?' · loading…':'')+(nt.why?'<br><span style="color:#a7d9d1">'+esc(nt.why)+'</span>':'');
     $('nextHint').innerHTML=nt.an?(nt.cue!=null?'Using your start point. <a id="clearCue">Clear it</a>':'Tap the waveform to choose where it comes in.'):'';
     const c=$('clearCue'); if(c) c.onclick=()=>{ nt.cue=null; updateHints(); };
   }else{ $('nextSub').textContent=''; $('nextHint').textContent=S.autodj&&S.vibe?'Finding the next song…':'Queue is empty after this song.'; }
@@ -691,7 +804,7 @@ function renderQueue(){
     el.appendChild(trackRow(t,{cls:(t===nowTrack?' now':'')+(t===nx?' nx':'')+(ni>=0&&i<ni?' played':''),extra:st,buttons:[
       ['Mix in',()=>{ moveNext(t); mixNext(t); },locked||t.status==='error'],
       ['Next',()=>moveNext(t),locked||t===nx],
-      ['✕',()=>{ const k=idx(t); if(k>=0){ queue.splice(k,1); release(t); prepareAhead(); } },locked]]}));
+      ['✕',()=>{ const k=idx(t); if(k>=0){ if(t.auto) noteSkip(t); queue.splice(k,1); release(t); prepareAhead(); ensureQueue(); } },locked]]}));
   });
 }
 function moveNext(t){
@@ -761,11 +874,12 @@ function frame(){
   if(t&&lastNowId!==t.id){ lastNowId=t.id; $('nowTitle').textContent=t.name; artCss($('nowArt'),t); }
   if(t){ $('nowSub').innerHTML=subHtml(t)+(A&&A.src&&t.an&&t.an.reliable&&Math.abs(A.rateAt(now)-1)>0.001?' · now '+(t.an.bpm*A.rateAt(now)).toFixed(0):'');
     $('nowTime').textContent=posNow!=null?fmt(posNow)+' / −'+fmt(A.dur-posNow):''; }
-  const mk=[]; if(t&&t.an&&S.auto&&A&&A.src&&!mixing&&nextTrack()) mk.push({t:autoMixPos(A),label:'mix',on:true});
+  const mk=[]; if(t&&t.an&&S.auto&&A&&A.src&&!mixing&&nextTrack()) mk.push({t:autoMixPos(A,nextTrack()),label:'mix',on:true});
   drawWave($('nowCanvas'),t,posNow,mk,'#35d0ba');
   const nt=nextTrack(); let posNext=null; const mk2=[];
   if(nt&&nt.an){ const an=nt.an;
-    if(nt.cue==null){ mk2.push({t:an.barT[an.startBar]||0,label:'start',on:S.entry==='start'});
+    if(nt.cue==null&&S.entry==='dj'){ const di=djInfo(an); mk2.push({t:an.barT[di.entryBar]||0,label:di.longIntro?'in (intro mix)':'in',on:true}); }
+    else if(nt.cue==null){ mk2.push({t:an.barT[an.startBar]||0,label:'start',on:S.entry==='start'});
       if(an.introBar!==an.startBar) mk2.push({t:an.barT[an.introBar],label:'intro end',on:S.entry==='intro'});
       if(an.dropBar!==an.introBar) mk2.push({t:an.barT[an.dropBar],label:'drop',on:S.entry==='drop'}); }
     else mk2.push({t:entryTime(nt),label:'your start',on:true});
@@ -779,7 +893,7 @@ function frame(){
       const sync=Math.abs(mixing.rB-1)>0.0005?' · tempo matched '+(mixing.rB>1?'+':'')+((mixing.rB-1)*100).toFixed(1)+'%':'';
       if(now<mixing.T) setStatus('<b>'+label+'</b> in '+(mixing.T-now).toFixed(1)+' s, on the '+(S.quant==='beat'?'beat':'bar')+sync);
       else setStatus('<b>'+label+'</b> '+Math.min(100,Math.round((now-mixing.T)/(mixing.end-mixing.T)*100))+'%'+sync+(queuedNext?' · next mix queued':''));
-    }else if(!/Added|plays next|Vibe set/.test($('status').textContent)) setStatus(S.autodj&&S.vibe?'Playing · Auto DJ keeps the '+VIBES[S.vibe].label.toLowerCase()+' going.':'Playing.');
+    }else if(!/Added|plays next|Vibe set/.test($('status').textContent)) setStatus(S.autodj&&S.vibe?'Playing · Auto DJ keeps the '+(S.vibe==='bollywood'?'Bollywood':VIBES[S.vibe].label.toLowerCase())+' going.':'Playing.');
   }
 }
 requestAnimationFrame(frame);
@@ -820,7 +934,12 @@ if('mediaSession' in navigator){ try{
   navigator.mediaSession.setActionHandler('nexttrack',()=>mixNext());
   navigator.mediaSession.setActionHandler('play',()=>playPause());
   navigator.mediaSession.setActionHandler('pause',()=>playPause()); }catch(e){} }
-renderSettings(); renderVibes(); renderChips(); renderQueue(); updateHints();
+let lfmStatus='';
+function renderLfm(){ const el=$('lfmStatus'); if(!el) return; el.textContent=lfmKey()?(lfmStatus||'Key saved. It is used to find the hits behind each remix and songs that go together.'):'Optional. With a key, the Bollywood vibe starts from real hit songs and picks songs that fans play together.'; }
+$('lfmKey').value=S.lfmKey||'';
+$('lfmForm').onsubmit=e=>{ e.preventDefault(); S.lfmKey=$('lfmKey').value.trim(); saveSettings(); lfmStatus=''; lfmCache.clear(); pool.clear(); poolFor=null; renderLfm();
+  if(lfmKey()) topTracksForTag('bollywood',1); };
+renderSettings(); renderVibes(); renderChips(); renderQueue(); updateHints(); renderLfm();
 </script>
 </body>
 </html>
