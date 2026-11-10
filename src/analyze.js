@@ -1,4 +1,4 @@
-function analyzeCore(x, sr){
+function analyzeCore(x, sr, hint){
   const n=x.length, dur=n/sr, hop=Math.max(1,Math.round(sr/100)), fps=sr/hop, nf=Math.floor(n/hop);
   // two cascaded RBJ low-pass filters at 140 Hz (kick and bass band)
   const w0=2*Math.PI*140/sr, cs=Math.cos(w0), al=Math.sin(w0)/(2*0.7071), a0=1+al;
@@ -38,7 +38,8 @@ function analyzeCore(x, sr){
     let bestL=minL, bestS=-1;
     for(let L=minL;L<=maxL;L++){
       let s=0; for(let i=0;i<nf-L;i++) s+=on2[i]*on2[i+L]; s/=(nf-L);
-      const b=60*fps/L, w=Math.exp(-0.5*Math.pow(Math.log2(b/122)/0.6,2));
+      const b=60*fps/L; let w=Math.exp(-0.5*Math.pow(Math.log2(b/122)/0.6,2));
+      if(hint>40){ let d=9; for(const f of [1,2,0.5]) d=Math.min(d,Math.abs(Math.log2(b/(hint*f)))); w*=0.15+Math.exp(-0.5*Math.pow(d/0.04,2)); } // trust Audius's tempo estimate
       if(s*w>bestS){bestS=s*w;bestL=L;}
     }
     let bP=bestL,bPh=0,bSc=-1,bMean=1;
