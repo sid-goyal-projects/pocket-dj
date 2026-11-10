@@ -45,16 +45,16 @@ button.primary{background:var(--a);color:#06201c;border-color:var(--a);font-weig
 .status{color:var(--muted);font-size:13px;min-height:19px;margin-bottom:10px;font-variant-numeric:tabular-nums}
 .status b{color:var(--text)}
 .tabs{display:flex;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:4px;margin-bottom:10px;position:sticky;top:0;z-index:5}
-.tabs button{flex:1;border:0;background:transparent;padding:9px 4px;font-size:14px;color:var(--muted)}
+.tabs button{flex:1;border:0;background:transparent;padding:9px 2px;font-size:13.5px;color:var(--muted);white-space:nowrap}
 .tabs button.on{background:var(--panel2);color:var(--text)}
 section{display:none} section.on{display:block}
 .row{display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid #1d2028}
 .row:last-child{border-bottom:0}
-.row .tinfo .ttl{font-size:14px;font-weight:560}
+.row .tinfo .ttl{font-size:14px;font-weight:560;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.25}
 .row.now{box-shadow:inset 3px 0 0 var(--a);padding-left:8px}
 .row.nx{box-shadow:inset 3px 0 0 var(--b);padding-left:8px}
 .row.played{opacity:.45}
-.row button{padding:7px 9px;font-size:13px;border-radius:9px}
+.row button{padding:7px 8px;font-size:13px;border-radius:9px;min-width:32px}
 .row .acts{display:flex;gap:5px;flex:none}
 input[type=search],input[type=text]{width:100%;font:inherit;color:var(--text);background:#0b0c10;border:1px solid var(--line);border-radius:10px;padding:11px 12px}
 .srow{display:flex;gap:8px;margin-bottom:8px}
@@ -105,6 +105,7 @@ input[type=range]{width:100%;accent-color:var(--a)}
 
   <nav class="tabs">
     <button data-tab="vibe" class="on">Vibe</button>
+    <button data-tab="foryou">For you</button>
     <button data-tab="search">Search</button>
     <button data-tab="queue">Queue</button>
     <button data-tab="mixing">Mixing</button>
@@ -114,12 +115,19 @@ input[type=range]{width:100%;accent-color:var(--a)}
     <div class="vibes" id="vibes"></div>
     <div class="set"><span class="h">Auto DJ</span>
       <div class="seg" id="autoSeg"></div>
-      <div class="muted" style="margin-top:6px">When on, Pocket DJ keeps a few songs queued that fit the vibe, picks ones close in tempo and key to what is playing, and mixes them in by itself. Songs you skip in the first 40 seconds count against that artist and song.</div>
+      <div class="muted" style="margin-top:6px"><b>Add songs for me:</b> keeps 3 songs queued that fit the vibe. <b>Only suggest:</b> you pick from the For you tab, and it adds one song only if the queue is about to run out. Songs you skip in the first 40 seconds count against that artist and song.</div>
     </div>
+    <div class="set"><span class="h">Bollywood songs</span><div class="seg" id="origSeg"></div>
+      <div class="muted" style="margin-top:6px">Originals on Audius are mostly uploaded by fans, not the artists or labels, so some may disappear.</div></div>
     <div class="set"><span class="h">Last.fm listening data</span>
       <form class="srow" id="lfmForm"><input type="text" id="lfmKey" placeholder="Paste your Last.fm API key" autocomplete="off" spellcheck="false"><button type="submit">Save</button></form>
       <div class="muted" id="lfmStatus"></div>
     </div>
+  </section>
+
+  <section id="tab-foryou">
+    <div class="srow" style="align-items:center"><div class="muted" id="sugHead" style="flex:1">Suggestions</div><button id="sugRefresh">Refresh</button></div>
+    <div id="sugList"><div class="empty">Pick a vibe first.</div></div>
   </section>
 
   <section id="tab-search">
@@ -255,7 +263,7 @@ function analyzeCore(x, sr, hint){
 
 
 /* ===================== Settings ===================== */
-const DEFAULTS={entry:'dj',lfmKey:'',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true};
+const DEFAULTS={entry:'dj',lfmKey:'',style:'blend',bars:16,quant:'bar',match:true,stretch:0.08,auto:true,vibe:null,autodj:true,awake:true,originals:true};
 let S=Object.assign({},DEFAULTS);
 try{ Object.assign(S,JSON.parse(localStorage.getItem('pdj-settings')||'{}')); }catch(e){}
 if(!S.v03){ S.entry='dj'; S.v03=true; }
@@ -380,7 +388,7 @@ async function refillPool(){
       if(v.must&&!hit&&!v.must.test([t.title,t.tags||'',(t.user&&t.user.name)||''].join(' '))) continue; // stay on vibe
       const tr=fromAudius(t); if(hit) tr.hit=hit;
       if(JUNK.test(tr.name)) continue;
-      if(v.remixy&&!REMIXY.test(tr.name)) continue;      // remixes and mashups only
+      if(v.remixy&&!S.originals&&!REMIXY.test(tr.name)) continue;      // remixes only, when originals are switched off
       if(v.search&&!hit&&(tr.plays||0)<150) continue;    // unknown and barely played: skip
       if(played.has(tr.id)||queue.some(q=>q.id===tr.id)) continue;
       const old=pool.get(tr.id); if(!old||(!old.hit&&tr.hit)) pool.set(tr.id,tr);
@@ -397,12 +405,12 @@ function noteSkip(tr){
 }
 function dislikePenalty(t){ return 0.7*(dislikes['a:'+(t.artist||'')]||0)+1.0*(t.hit?(dislikes['h:'+normT(t.hit.name)]||0):0); }
 function hitKey(t){ return t.hit?normT(t.hit.name):null; }
-function pickFromPool(sim){
-  const ref=lastQueued(), v=VIBES[S.vibe];
+function rankPool(sim){
+  const ref=lastQueued(), v=VIBES[S.vibe]; if(!v) return [];
   const refBpm=ref?((ref.an&&ref.an.reliable)?ref.an.bpm:ref.bpmHint):null;
   const target=refBpm||((v.bpm[0]+v.bpm[1])/2);
   const usedHits=new Set([...playedHits,...queue.map(hitKey).filter(Boolean)]);
-  let best=null,bs=1e9;
+  const out=[];
   for(const t of pool.values()){
     if(played.has(t.id)||queue.some(q=>q.id===t.id)||(hitKey(t)&&usedHits.has(hitKey(t)))){ pool.delete(t.id); continue; }
     let s=(t.bpmHint?tempoGap(t.bpmHint,target)*12:0.8)+(ref?keyDist(ref.keyHint,t.keyHint):0)+Math.random()*0.35;
@@ -411,14 +419,18 @@ function pickFromPool(sim){
     if(t.hit) s-=0.6+0.4*Math.max(0,1-t.hit.rank/150);
     if(sim&&t.hit&&sim.has(normT(t.hit.name))) s-=1.2*Math.min(1,sim.get(normT(t.hit.name))+0.3);
     s+=dislikePenalty(t);
-    if(s<bs){bs=s;best=t;}
+    out.push({t,s});
   }
+  return out.sort((a,b)=>a.s-b.s);
+}
+function pickFromPool(sim){
+  const r=rankPool(sim); const best=r.length?r[0].t:null;
   if(best){ pool.delete(best.id); best.why=whyText(best,sim); }
   return best;
 }
 function whyText(t,sim){
   const bits=[];
-  if(t.hit) bits.push('remix of “'+t.hit.name+'”'+(t.hit.artist?' by '+t.hit.artist:'')+(t.hit.rank<=150?' · #'+t.hit.rank+' '+t.hit.tag+' on Last.fm':''));
+  if(t.hit) bits.push((REMIXY.test(t.name)?'remix of “':'“')+t.hit.name+'”'+(t.hit.artist?' by '+t.hit.artist:'')+(t.hit.rank<=150?' · #'+t.hit.rank+' '+t.hit.tag+' on Last.fm':''));
   if(sim&&t.hit&&sim.has(normT(t.hit.name))) bits.push('fans of the last song also play it');
   if(!t.hit&&(t.plays||0)>2000) bits.push(Math.round(t.plays/1000)+'k plays on Audius');
   return bits.join(' · ');
@@ -429,15 +441,40 @@ async function ensureQueue(){
   if(!S.autodj||!S.vibe||fillBusy) return; fillBusy=true;
   try{
     const ahead=()=>{ const i=nowTrack?idx(nowTrack):-1; return queue.length-1-i; };
+    const suggestOnly=S.autodj==='suggest';
+    // in suggest-only mode the AI adds a song only when the queue would otherwise run dry
+    const d=decks[cur], left=(d&&d.src&&ctx)?(d.dur-d.posAt(ctx.currentTime)):0;
+    const want=suggestOnly?((!nowTrack||left<75)&&ahead()<1?1:0):3;
     let guard=0;
-    while(ahead()<3&&guard++<6){
+    while(ahead()<want&&guard++<6){
       if(pool.size<4) await refillPool();
       const ref=lastQueued(); const sim=ref&&ref.hit?await similarTo(ref.hit):null;
       const t=pickFromPool(sim); if(!t){ if(pool.size===0) break; continue; }
       queue.push(t);
+      if(suggestOnly&&nowTrack) setStatus('Queue was about to run out, so I added “'+esc(t.name)+'”.');
     }
-    prepareAhead();
+    if(pool.size<8) await refillPool();
+    prepareAhead(); refreshSuggestions();
   }finally{ fillBusy=false; }
+}
+/* ---------- AI suggestions you can pick from ---------- */
+let sugBusy=false;
+async function refreshSuggestions(force){
+  const el=$('sugList'); if(!el) return;
+  if(!S.vibe){ el.innerHTML='<div class="empty">Pick a vibe first. Suggestions are built for the vibe and for what is playing.</div>'; return; }
+  if(sugBusy) return; sugBusy=true;
+  try{
+    if(force||pool.size<8) await refillPool();
+    const ref=lastQueued(); const sim=ref&&ref.hit?await similarTo(ref.hit):null;
+    const list=rankPool(sim).slice(0,10).map(x=>{ x.t.why=whyText(x.t,sim); return x.t; });
+    $('sugHead').textContent='Picked for '+VIBES[S.vibe].label+(ref?' · to follow “'+ref.name.slice(0,40)+'”':'');
+    el.innerHTML='';
+    if(!list.length){ el.innerHTML='<div class="empty">No suggestions yet. Tap Refresh.</div>'; return; }
+    for(const t of list){
+      const take=how=>{ pool.delete(t.id); addTrack(t,how); setStatus(how==='now'?'Mixing in “'+esc(t.name)+'”.':'Added “'+esc(t.name)+'”'+(how==='next'?' to play next.':' to the queue.')); refreshSuggestions(); };
+      el.appendChild(trackRow(t,{extra:t.why?'<br><span style="color:#a7d9d1">'+esc(t.why)+'</span>':'',buttons:[['Mix in',()=>take('now')],['Next',()=>take('next')],['+',()=>take('end')]]}));
+    }
+  }finally{ sugBusy=false; }
 }
 function renderVibes(){
   const el=$('vibes'); el.innerHTML='';
@@ -446,13 +483,14 @@ function renderVibes(){
     b.innerHTML='<b>'+v.label+'</b><span>'+v.desc+' · '+v.bpm[0]+'–'+v.bpm[1]+' BPM</span>';
     b.onclick=()=>startVibe(k); el.appendChild(b);
   }
-  segButtons($('autoSeg'),'autodj',[[true,'On'],[false,'Off']],()=>{ updateChip(); ensureQueue(); });
+  segButtons($('autoSeg'),'autodj',[[true,'Add songs for me'],['suggest','Only suggest'],[false,'Off']],()=>{ updateChip(); ensureQueue(); });
+  segButtons($('origSeg'),'originals',[[true,'Remixes and originals'],[false,'Remixes only']],()=>{ pool.clear(); poolFor=null; refreshSuggestions(true); });
   updateChip();
 }
-function updateChip(){ $('vibeChip').textContent=S.autodj&&S.vibe?'Auto DJ · '+VIBES[S.vibe].label:'Auto DJ off'; }
+function updateChip(){ $('vibeChip').textContent=S.vibe&&S.autodj?(S.autodj==='suggest'?'Suggesting · ':'Auto DJ · ')+VIBES[S.vibe].label:'Auto DJ off'; }
 async function startVibe(k){
   initAudio(); unlockAudio();
-  const changed=S.vibe!==k; S.vibe=k; S.autodj=true; saveSettings(); renderVibes();
+  const changed=S.vibe!==k; S.vibe=k; if(!S.autodj) S.autodj=true; saveSettings(); renderVibes();
   if(changed){ // drop upcoming auto-picked songs that belong to the old vibe
     const i=nowTrack?idx(nowTrack):-1; const lockTo=mixing?i+1:i;
     for(let j=queue.length-1;j>lockTo;j--) if(queue[j].auto) queue.splice(j,1);
@@ -818,11 +856,18 @@ function renderQueue(){
   queue.forEach((t,i)=>{
     const locked=t===nowTrack||(mixing&&t===mixing.nextTr);
     const st=t.status==='loading'?' · loading…':t.status==='error'?' · could not load':'';
-    el.appendChild(trackRow(t,{cls:(t===nowTrack?' now':'')+(t===nx?' nx':'')+(ni>=0&&i<ni?' played':''),extra:st,buttons:[
-      ['Mix in',()=>{ moveNext(t); mixNext(t); },locked||t.status==='error'],
-      ['Next',()=>moveNext(t),locked||t===nx],
+    const past=ni>=0&&i<ni, minI=ni+(mixing?2:1);
+    el.appendChild(trackRow(t,{cls:(t===nowTrack?' now':'')+(t===nx?' nx':'')+(past?' played':''),extra:(t.auto&&!past&&!locked?' · <span style="color:#35d0ba">AI pick</span>':'')+st,buttons:[
+      ['Mix in',()=>{ t.auto=false; moveNext(t); mixNext(t); },locked||past||t.status==='error'],
+      ['▲',()=>moveBy(t,-1),locked||past||i<=minI],
+      ['▼',()=>moveBy(t,1),locked||past||i>=queue.length-1],
       ['✕',()=>{ const k=idx(t); if(k>=0){ if(t.auto) noteSkip(t); queue.splice(k,1); release(t); prepareAhead(); ensureQueue(); } },locked]]}));
   });
+}
+function moveBy(t,d){
+  const k=idx(t), j=k+d, ni=nowTrack?idx(nowTrack):-1, minI=ni+(mixing?2:1);
+  if(k<0||j<minI||j>=queue.length) return;
+  queue.splice(k,1); queue.splice(j,0,t); t.auto=false; prepareAhead(); refreshSuggestions();
 }
 function moveNext(t){
   if(t===nowTrack) return;
@@ -935,7 +980,9 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id==='tab-'+b.dataset.tab));
   if(b.dataset.tab==='search'&&!lastResults.length) search('', chipGenre);
+  if(b.dataset.tab==='foryou') refreshSuggestions();
 });
+$('sugRefresh').onclick=()=>{ $('sugList').innerHTML='<div class="empty">Finding songs…</div>'; refreshSuggestions(true); };
 $('searchForm').onsubmit=e=>{ e.preventDefault(); $('q').blur(); search($('q').value.trim(),chipGenre); };
 $('nextCanvas').addEventListener('click',e=>{
   const nt=nextTrack(); if(!nt||!nt.an||(mixing&&mixing.nextTr===nt)) return;
