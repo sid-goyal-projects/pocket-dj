@@ -181,7 +181,7 @@ const VIBES={
   workout:{label:'Workout',desc:'Trap, D&B, bass music',genres:['Trap','Hip-Hop/Rap','Drum & Bass','Dubstep','Electro','Future Bass'],bpm:[124,178]},
   latenight:{label:'Late night',desc:'Techno and progressive',genres:['Techno','Deep House','Progressive House','Trance'],bpm:[120,134]},
   focus:{label:'Focus',desc:'Ambient and lo-fi',genres:['Lo-Fi','Ambient','Downtempo'],bpm:[60,100]},
-  bollywood:{label:'Bollywood',desc:'Remixes and mashups of Hindi and Punjabi hits',search:['bollywood remix','bollywood mashup','hindi remix','punjabi remix','bhangra remix','desi remix','bollywood edit','desi mashup','bollywood bootleg','punjabi mashup'],tags:['bollywood','hindi','punjabi','bhangra'],bpm:[88,135],remixy:true},
+  bollywood:{label:'Bollywood',desc:'Remixes and mashups of Hindi and Punjabi hits',search:['bollywood remix','bollywood mashup','hindi remix','punjabi remix','bhangra remix','desi remix','bollywood edit','desi mashup','bollywood bootleg','punjabi mashup'],tags:['bollywood','hindi','punjabi','bhangra'],bpm:[88,135],remixy:true,must:/\b(bollywood|hindi|punjabi|panjabi|bhangra|desi|dhol|indian?|bombay|mumbai|arijit|badshah|diljit|honey singh|sidhu|guru randhawa|neha kakkar|pritam|shah ?rukh|srk|salman|ranveer|kareena|katrina|tum|dil|ishq|pyaar|pyar|yaar|kudi|munda|nach|mahi|sajna|jaan|zindagi|sanam|chura|bhai|kala|chashma|naina|jawani|jalwa|lungi|thumka|ghoomar|desi)\b/i},
 };
 const CAM={'C major':'8B','G major':'9B','D major':'10B','A major':'11B','E major':'12B','B major':'1B','F# major':'2B','Gb major':'2B','Db major':'3B','C# major':'3B','Ab major':'4B','G# major':'4B','Eb major':'5B','D# major':'5B','Bb major':'6B','A# major':'6B','F major':'7B',
   'A minor':'8A','E minor':'9A','B minor':'10A','F# minor':'11A','Gb minor':'11A','C# minor':'12A','Db minor':'12A','G# minor':'1A','Ab minor':'1A','D# minor':'2A','Eb minor':'2A','A# minor':'3A','Bb minor':'3A','F minor':'4A','C minor':'5A','G minor':'6A','D minor':'7A'};
@@ -268,6 +268,7 @@ async function refillPool(){
     for(const {t,hit} of found){
       if(t.is_streamable===false||!(t.duration>=110&&t.duration<=480)) continue;
       if(t.bpm&&!(t.bpm>=v.bpm[0]*0.97&&t.bpm<=v.bpm[1]*1.03)&&!(t.bpm*2>=v.bpm[0]&&t.bpm*2<=v.bpm[1])) continue;
+      if(v.must&&!hit&&!v.must.test([t.title,t.tags||'',(t.user&&t.user.name)||''].join(' '))) continue; // stay on vibe
       const tr=fromAudius(t); if(hit) tr.hit=hit;
       if(JUNK.test(tr.name)) continue;
       if(v.remixy&&!REMIXY.test(tr.name)) continue;      // remixes and mashups only
